@@ -33,6 +33,7 @@ class HitTestingPayload(BaseModel):
     query: str = Field(max_length=250)
     retrieval_model: dict[str, Any] | None = None
     external_retrieval_model: dict[str, Any] | None = None
+    attachment_ids: list[str] | None = None
 
 
 class DatasetsHitTestingBase:
@@ -55,15 +56,22 @@ class DatasetsHitTestingBase:
         HitTestingService.hit_testing_args_check(args)
 
     @staticmethod
+    def parse_args(payload: dict[str, Any]) -> dict[str, Any]:
+        """Validate and return hit-testing arguments from an incoming payload."""
+        hit_testing_payload = HitTestingPayload.model_validate(payload or {})
+        return hit_testing_payload.model_dump(exclude_none=True)
+
+    @staticmethod
     def perform_hit_testing(dataset, args):
         assert isinstance(current_user, Account)
         try:
             response = HitTestingService.retrieve(
                 dataset=dataset,
-                query=args["query"],
+                query=args.get("query"),
                 account=current_user,
-                retrieval_model=args["retrieval_model"],
-                external_retrieval_model=args["external_retrieval_model"],
+                retrieval_model=args.get("retrieval_model"),
+                external_retrieval_model=args.get("external_retrieval_model"),
+                attachment_ids=args.get("attachment_ids"),
                 limit=10,
             )
             return {"query": response["query"], "records": marshal(response["records"], hit_testing_record_fields)}

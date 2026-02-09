@@ -1,34 +1,34 @@
+import type AudioPlayer from '@/app/components/base/audio-btn/audio'
+import type { Node } from '@/app/components/workflow/types'
+import type { IOtherOptions } from '@/service/base'
+import type { VersionHistory } from '@/types/workflow'
+import { noop } from 'es-toolkit/function'
+import { produce } from 'immer'
+import { usePathname } from 'next/navigation'
 import { useCallback, useRef } from 'react'
 import {
   useReactFlow,
   useStoreApi,
 } from 'reactflow'
-import { produce } from 'immer'
 import { v4 as uuidV4 } from 'uuid'
-import { usePathname } from 'next/navigation'
-import { useWorkflowStore } from '@/app/components/workflow/store'
-import type { Node } from '@/app/components/workflow/types'
-import { WorkflowRunningStatus } from '@/app/components/workflow/types'
+import { useStore as useAppStore } from '@/app/components/app/store'
+import { trackEvent } from '@/app/components/base/amplitude'
+import { AudioPlayerManager } from '@/app/components/base/audio-btn/audio.player.manager'
+import { useFeaturesStore } from '@/app/components/base/features/hooks'
+import Toast from '@/app/components/base/toast'
+import { TriggerType } from '@/app/components/workflow/header/test-run-menu'
 import { useWorkflowUpdate } from '@/app/components/workflow/hooks/use-workflow-interactions'
 import { useWorkflowRunEvent } from '@/app/components/workflow/hooks/use-workflow-run-event/use-workflow-run-event'
-import { useStore as useAppStore } from '@/app/components/app/store'
-import type { IOtherOptions } from '@/service/base'
-import Toast from '@/app/components/base/toast'
-import { handleStream, ssePost } from '@/service/base'
-import { stopWorkflowRun } from '@/service/workflow'
-import { useFeaturesStore } from '@/app/components/base/features/hooks'
-import { AudioPlayerManager } from '@/app/components/base/audio-btn/audio.player.manager'
-import type AudioPlayer from '@/app/components/base/audio-btn/audio'
-import type { VersionHistory } from '@/types/workflow'
-import { noop } from 'lodash-es'
-import { useNodesSyncDraft } from './use-nodes-sync-draft'
+import { useWorkflowStore } from '@/app/components/workflow/store'
+import { WorkflowRunningStatus } from '@/app/components/workflow/types'
+import { handleStream, post, sseGet, ssePost } from '@/service/base'
+import { ContentType } from '@/service/fetch'
 import { useInvalidAllLastRun } from '@/service/use-workflow'
+import { stopWorkflowRun } from '@/service/workflow'
+import { AppModeEnum } from '@/types/app'
 import { useSetWorkflowVarsWithValue } from '../../workflow/hooks/use-fetch-workflow-inspect-vars'
 import { useConfigsMap } from './use-configs-map'
-import { post } from '@/service/base'
-import { ContentType } from '@/service/fetch'
-import { TriggerType } from '@/app/components/workflow/header/test-run-menu'
-import { AppModeEnum } from '@/types/app'
+import { useNodesSyncDraft } from './use-nodes-sync-draft'
 
 type HandleRunMode = TriggerType
 type HandleRunOptions = {
@@ -79,6 +79,9 @@ export const useWorkflowRun = () => {
     handleWorkflowFailed,
     handleWorkflowNodeStarted,
     handleWorkflowNodeFinished,
+    handleWorkflowNodeHumanInputRequired,
+    handleWorkflowNodeHumanInputFormFilled,
+    handleWorkflowNodeHumanInputFormTimeout,
     handleWorkflowNodeIterationStarted,
     handleWorkflowNodeIterationNext,
     handleWorkflowNodeIterationFinished,
@@ -89,6 +92,7 @@ export const useWorkflowRun = () => {
     handleWorkflowAgentLog,
     handleWorkflowTextChunk,
     handleWorkflowTextReplace,
+    handleWorkflowPaused,
   } = useWorkflowRunEvent()
 
   const handleBackupDraft = useCallback(() => {
@@ -176,6 +180,10 @@ export const useWorkflowRun = () => {
       onNodeRetry,
       onAgentLog,
       onError,
+      onWorkflowPaused,
+      onHumanInputRequired,
+      onHumanInputFormFilled,
+      onHumanInputFormTimeout,
       onCompleted,
       ...restCallback
     } = callback || {}
@@ -359,6 +367,7 @@ export const useWorkflowRun = () => {
 
       if (onError)
         onError(params)
+      trackEvent('workflow_run_failed', { workflow_id: flowId, reason: params.error, node_type: params.node_type })
     }
 
     const wrappedOnCompleted: IOtherOptions['onCompleted'] = async (hasError?: boolean, errorMessage?: string) => {
@@ -371,12 +380,6 @@ export const useWorkflowRun = () => {
     const baseSseOptions: IOtherOptions = {
       ...restCallback,
       onWorkflowStarted: (params) => {
-        const state = workflowStore.getState()
-        if (state.workflowRunningData) {
-          state.setWorkflowRunningData(produce(state.workflowRunningData, (draft) => {
-            draft.resultText = ''
-          }))
-        }
         handleWorkflowStarted(params)
 
         if (onWorkflowStarted)
@@ -491,6 +494,32 @@ export const useWorkflowRun = () => {
         if (audioPlayer)
           audioPlayer.playAudioWithAudio(audio, false)
       },
+      onWorkflowPaused: (params) => {
+        handleWorkflowPaused()
+        if (onWorkflowPaused)
+          onWorkflowPaused(params)
+        const url = `/workflow/${params.workflow_run_id}/events`
+        sseGet(
+          url,
+          {},
+          baseSseOptions,
+        )
+      },
+      onHumanInputRequired: (params) => {
+        handleWorkflowNodeHumanInputRequired(params)
+        if (onHumanInputRequired)
+          onHumanInputRequired(params)
+      },
+      onHumanInputFormFilled: (params) => {
+        handleWorkflowNodeHumanInputFormFilled(params)
+        if (onHumanInputFormFilled)
+          onHumanInputFormFilled(params)
+      },
+      onHumanInputFormTimeout: (params) => {
+        handleWorkflowNodeHumanInputFormTimeout(params)
+        if (onHumanInputFormTimeout)
+          onHumanInputFormTimeout(params)
+      },
       onError: wrappedOnError,
       onCompleted: wrappedOnCompleted,
     }
@@ -603,6 +632,10 @@ export const useWorkflowRun = () => {
             baseSseOptions.onTTSEnd,
             baseSseOptions.onTextReplace,
             baseSseOptions.onAgentLog,
+            baseSseOptions.onHumanInputRequired,
+            baseSseOptions.onHumanInputFormFilled,
+            baseSseOptions.onHumanInputFormTimeout,
+            baseSseOptions.onWorkflowPaused,
             baseSseOptions.onDataSourceNodeProcessing,
             baseSseOptions.onDataSourceNodeCompleted,
             baseSseOptions.onDataSourceNodeError,
@@ -654,20 +687,157 @@ export const useWorkflowRun = () => {
       return
     }
 
+    const finalCallbacks: IOtherOptions = {
+      ...baseSseOptions,
+      getAbortController: (controller: AbortController) => {
+        abortControllerRef.current = controller
+      },
+      onWorkflowFinished: (params) => {
+        handleWorkflowFinished(params)
+
+        if (onWorkflowFinished)
+          onWorkflowFinished(params)
+        if (isInWorkflowDebug) {
+          fetchInspectVars({})
+          invalidAllLastRun()
+        }
+      },
+      onError: (params) => {
+        handleWorkflowFailed()
+
+        if (onError)
+          onError(params)
+      },
+      onNodeStarted: (params) => {
+        handleWorkflowNodeStarted(
+          params,
+          {
+            clientWidth,
+            clientHeight,
+          },
+        )
+
+        if (onNodeStarted)
+          onNodeStarted(params)
+      },
+      onNodeFinished: (params) => {
+        handleWorkflowNodeFinished(params)
+
+        if (onNodeFinished)
+          onNodeFinished(params)
+      },
+      onIterationStart: (params) => {
+        handleWorkflowNodeIterationStarted(
+          params,
+          {
+            clientWidth,
+            clientHeight,
+          },
+        )
+
+        if (onIterationStart)
+          onIterationStart(params)
+      },
+      onIterationNext: (params) => {
+        handleWorkflowNodeIterationNext(params)
+
+        if (onIterationNext)
+          onIterationNext(params)
+      },
+      onIterationFinish: (params) => {
+        handleWorkflowNodeIterationFinished(params)
+
+        if (onIterationFinish)
+          onIterationFinish(params)
+      },
+      onLoopStart: (params) => {
+        handleWorkflowNodeLoopStarted(
+          params,
+          {
+            clientWidth,
+            clientHeight,
+          },
+        )
+
+        if (onLoopStart)
+          onLoopStart(params)
+      },
+      onLoopNext: (params) => {
+        handleWorkflowNodeLoopNext(params)
+
+        if (onLoopNext)
+          onLoopNext(params)
+      },
+      onLoopFinish: (params) => {
+        handleWorkflowNodeLoopFinished(params)
+
+        if (onLoopFinish)
+          onLoopFinish(params)
+      },
+      onNodeRetry: (params) => {
+        handleWorkflowNodeRetry(params)
+
+        if (onNodeRetry)
+          onNodeRetry(params)
+      },
+      onAgentLog: (params) => {
+        handleWorkflowAgentLog(params)
+
+        if (onAgentLog)
+          onAgentLog(params)
+      },
+      onTextChunk: (params) => {
+        handleWorkflowTextChunk(params)
+      },
+      onTextReplace: (params) => {
+        handleWorkflowTextReplace(params)
+      },
+      onTTSChunk: (messageId: string, audio: string) => {
+        if (!audio || audio === '')
+          return
+        player?.playAudioWithAudio(audio, true)
+        AudioPlayerManager.getInstance().resetMsgId(messageId)
+      },
+      onTTSEnd: (messageId: string, audio: string) => {
+        player?.playAudioWithAudio(audio, false)
+      },
+      onWorkflowPaused: (params) => {
+        handleWorkflowPaused()
+        if (onWorkflowPaused)
+          onWorkflowPaused(params)
+        const url = `/workflow/${params.workflow_run_id}/events`
+        sseGet(
+          url,
+          {},
+          finalCallbacks,
+        )
+      },
+      onHumanInputRequired: (params) => {
+        handleWorkflowNodeHumanInputRequired(params)
+        if (onHumanInputRequired)
+          onHumanInputRequired(params)
+      },
+      onHumanInputFormFilled: (params) => {
+        handleWorkflowNodeHumanInputFormFilled(params)
+        if (onHumanInputFormFilled)
+          onHumanInputFormFilled(params)
+      },
+      onHumanInputFormTimeout: (params) => {
+        handleWorkflowNodeHumanInputFormTimeout(params)
+        if (onHumanInputFormTimeout)
+          onHumanInputFormTimeout(params)
+      },
+      ...restCallback,
+    }
+
     ssePost(
       url,
       {
         body: requestBody,
       },
-      {
-        ...baseSseOptions,
-        getAbortController: (controller: AbortController) => {
-          abortControllerRef.current = controller
-        },
-      },
+      finalCallbacks,
     )
-  }, [store, doSyncWorkflowDraft, workflowStore, pathname, handleWorkflowStarted, handleWorkflowFinished, fetchInspectVars, invalidAllLastRun, handleWorkflowFailed, handleWorkflowNodeStarted, handleWorkflowNodeFinished, handleWorkflowNodeIterationStarted, handleWorkflowNodeIterationNext, handleWorkflowNodeIterationFinished, handleWorkflowNodeLoopStarted, handleWorkflowNodeLoopNext, handleWorkflowNodeLoopFinished, handleWorkflowNodeRetry, handleWorkflowAgentLog, handleWorkflowTextChunk, handleWorkflowTextReplace],
-  )
+  }, [store, doSyncWorkflowDraft, workflowStore, pathname, handleWorkflowFailed, flowId, handleWorkflowStarted, handleWorkflowFinished, fetchInspectVars, invalidAllLastRun, handleWorkflowNodeStarted, handleWorkflowNodeFinished, handleWorkflowNodeIterationStarted, handleWorkflowNodeIterationNext, handleWorkflowNodeIterationFinished, handleWorkflowNodeLoopStarted, handleWorkflowNodeLoopNext, handleWorkflowNodeLoopFinished, handleWorkflowNodeRetry, handleWorkflowAgentLog, handleWorkflowTextChunk, handleWorkflowTextReplace, handleWorkflowPaused, handleWorkflowNodeHumanInputRequired, handleWorkflowNodeHumanInputFormFilled, handleWorkflowNodeHumanInputFormTimeout])
 
   const handleStopRun = useCallback((taskId: string) => {
     const setStoppedState = () => {

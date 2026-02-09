@@ -39,6 +39,7 @@ from core.app.entities.task_entities import (
     MessageAudioEndStreamResponse,
     MessageAudioStreamResponse,
     MessageEndStreamResponse,
+    StreamEvent,
     StreamResponse,
 )
 from core.app.task_pipeline.based_generate_task_pipeline import BasedGenerateTaskPipeline
@@ -70,6 +71,7 @@ class EasyUIBasedGenerateTaskPipeline(BasedGenerateTaskPipeline):
 
     _task_state: EasyUITaskState
     _application_generate_entity: Union[ChatAppGenerateEntity, CompletionAppGenerateEntity, AgentChatAppGenerateEntity]
+    _precomputed_event_type: StreamEvent | None = None
 
     def __init__(
         self,
@@ -332,12 +334,6 @@ class EasyUIBasedGenerateTaskPipeline(BasedGenerateTaskPipeline):
                 if not self._task_state.llm_result.prompt_messages:
                     self._task_state.llm_result.prompt_messages = chunk.prompt_messages
 
-                # Track streaming response times
-                if self._task_state.first_token_time is None:
-                    self._task_state.first_token_time = time.perf_counter()
-                    self._task_state.is_streaming_response = True
-                self._task_state.last_token_time = time.perf_counter()
-
                 # handle output moderation chunk
                 should_direct_answer = self._handle_output_moderation_chunk(cast(str, delta_text))
                 if should_direct_answer:
@@ -348,9 +344,15 @@ class EasyUIBasedGenerateTaskPipeline(BasedGenerateTaskPipeline):
                 self._task_state.llm_result.message.content = current_content
 
                 if isinstance(event, QueueLLMChunkEvent):
+                    # Determine the event type once, on first LLM chunk, and reuse for subsequent chunks
+                    if not hasattr(self, "_precomputed_event_type") or self._precomputed_event_type is None:
+                        self._precomputed_event_type = self._message_cycle_manager.get_message_event_type(
+                            message_id=self._message_id
+                        )
                     yield self._message_cycle_manager.message_to_stream_response(
                         answer=cast(str, delta_text),
                         message_id=self._message_id,
+                        event_type=self._precomputed_event_type,
                     )
                 else:
                     yield self._agent_message_to_stream_response(
@@ -404,18 +406,6 @@ class EasyUIBasedGenerateTaskPipeline(BasedGenerateTaskPipeline):
         message.total_price = usage.total_price
         message.currency = usage.currency
         self._task_state.llm_result.usage.latency = message.provider_response_latency
-
-        # Add streaming metrics to usage if available
-        if self._task_state.is_streaming_response and self._task_state.first_token_time:
-            start_time = self.start_at
-            first_token_time = self._task_state.first_token_time
-            last_token_time = self._task_state.last_token_time or first_token_time
-            usage.time_to_first_token = round(first_token_time - start_time, 3)
-            usage.time_to_generate = round(last_token_time - first_token_time, 3)
-
-        # Update metadata with the complete usage info
-        self._task_state.metadata.usage = usage
-
         message.message_metadata = self._task_state.metadata.model_dump_json()
 
         if trace_manager:

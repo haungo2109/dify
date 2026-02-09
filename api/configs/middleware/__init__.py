@@ -6,6 +6,7 @@ from pydantic import Field, NonNegativeFloat, NonNegativeInt, PositiveFloat, Pos
 from pydantic_settings import BaseSettings
 
 from .cache.redis_config import RedisConfig
+from .cache.redis_pubsub_config import RedisPubSubConfig
 from .storage.aliyun_oss_storage_config import AliyunOSSStorageConfig
 from .storage.amazon_s3_storage_config import S3StorageConfig
 from .storage.azure_blob_storage_config import AzureBlobStorageConfig
@@ -26,6 +27,7 @@ from .vdb.clickzetta_config import ClickzettaConfig
 from .vdb.couchbase_config import CouchbaseConfig
 from .vdb.elasticsearch_config import ElasticsearchConfig
 from .vdb.huawei_cloud_config import HuaweiCloudConfig
+from .vdb.iris_config import IrisVectorConfig
 from .vdb.lindorm_config import LindormConfig
 from .vdb.matrixone_config import MatrixoneConfig
 from .vdb.milvus_config import MilvusConfig
@@ -106,7 +108,7 @@ class KeywordStoreConfig(BaseSettings):
 
 class DatabaseConfig(BaseSettings):
     # Database type selector
-    DB_TYPE: Literal["postgresql", "mysql", "oceanbase"] = Field(
+    DB_TYPE: Literal["postgresql", "mysql", "oceanbase", "seekdb"] = Field(
         description="Database type to use. OceanBase is MySQL-compatible.",
         default="postgresql",
     )
@@ -316,6 +318,7 @@ class MiddlewareConfig(
     CeleryConfig,  # Note: CeleryConfig already inherits from DatabaseConfig
     KeywordStoreConfig,
     RedisConfig,
+    RedisPubSubConfig,
     # configs of storage and storage providers
     StorageConfig,
     AliyunOSSStorageConfig,
@@ -336,6 +339,7 @@ class MiddlewareConfig(
     ChromaConfig,
     ClickzettaConfig,
     HuaweiCloudConfig,
+    IrisVectorConfig,
     MilvusConfig,
     AlibabaCloudMySQLConfig,
     MyScaleConfig,
